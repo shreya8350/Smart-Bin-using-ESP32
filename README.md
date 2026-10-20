@@ -4,11 +4,13 @@ An IoT-based Smart Bin powered by ESP32 that automates bin operations and enable
 
 COMPONENTS USED:
 
-1.HC-SR04 Ultrasonic Sensors
+1.ESP 32 MICROCONTROLLER
 
-2.SG90 Servo Motor
+2.HC-SR04 Ultrasonic Sensors
 
-3.16x2 LCD Display
+3.SG90 Servo Motor
 
-4.NEOM-6M GPS Module
+4.16x2 LCD Display
+
+5.NEOM-6M GPS Module
 
