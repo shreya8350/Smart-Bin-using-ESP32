@@ -4,7 +4,7 @@ An IoT-based Smart Bin powered by ESP32 that automates bin operations and enable
 
 COMPONENTS USED:
 
-1.ESP 32 MICROCONTROLLER
+1.ESP32 MICROCONTROLLER
 
 2.HC-SR04 Ultrasonic Sensors
 
