@@ -1,5 +1,7 @@
 # Smart Bin Using ESP32
 
+<img width="1448" height="1086" alt="WhatsApp Image 2026-10-13 at 2 36 25 PM" src="https://github.com/user-attachments/assets/bb595a08-4f32-448d-b638-76a935838fca" />
+
 An IoT-based Smart Waste Management System built using ESP32, ultrasonic sensors, GPS, and Python. The system monitors waste levels, automatically controls the bin lid, detects when the bin is full, and provides real-time monitoring through a desktop application.
 
 ## Project Overview
