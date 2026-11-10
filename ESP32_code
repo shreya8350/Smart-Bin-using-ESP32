@@ -1,0 +1,1261 @@
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+
+// ============================================================
+// WIFI
+// ============================================================
+
+const char* WIFI_SSID = "YOUR_WIFI_NAME";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+WebServer server(80);
+
+
+// ============================================================
+// FALLBACK ESP32 ACCESS POINT
+// ============================================================
+
+const char* AP_SSID = "SMART-BIN-ESP32";
+const char* AP_PASSWORD = "YOUR_AP_PASSWORD";
+
+bool apMode = false;
+
+
+// ============================================================
+// LCD
+// ============================================================
+
+#define LCD_ADDR 0x27
+
+const int SDA_PIN = 21;
+const int SCL_PIN = 22;
+
+
+// ============================================================
+// HC-SR04 #1
+// Object / lid sensor
+// ============================================================
+
+const int TRIG1_PIN = 5;
+const int ECHO1_PIN = 34;
+
+
+// ============================================================
+// HC-SR04 #2
+// Waste-level sensor
+// Mounted at TOP of bin and facing DOWN
+// ============================================================
+
+const int TRIG2_PIN = 25;
+const int ECHO2_PIN = 26;
+
+
+// ============================================================
+// SERVO
+// ============================================================
+
+const int SERVO_PIN = 23;
+
+const int LID_CLOSED = 0;
+const int LID_OPEN = 180;
+
+
+// ============================================================
+// BUZZER
+// ============================================================
+
+const int BUZZER_PIN = 27;
+
+
+// ============================================================
+// OBJECT DETECTION
+// ============================================================
+
+const float OBJECT_DETECT_DISTANCE = 20.0;
+
+const unsigned long LID_OPEN_TIME = 3000;
+
+unsigned long lidOpenedTime = 0;
+
+
+// ============================================================
+// BIN CALIBRATION
+// ============================================================
+
+// Empty bin distance from sensor
+const float EMPTY_DISTANCE = 13.0;
+
+// Full bin distance from sensor
+const float FULL_DISTANCE = 3.0;
+
+
+// ============================================================
+// GPS
+// ============================================================
+
+HardwareSerial GPS(2);
+
+const int GPS_RX_PIN = 16;
+const int GPS_TX_PIN = 17;
+
+String gpsLine = "";
+
+float latitude = 0.0;
+float longitude = 0.0;
+
+bool gpsValid = false;
+
+
+// ============================================================
+// CURRENT VALUES
+// ============================================================
+
+float objectDistance = -1;
+float wasteDistance = -1;
+
+int wasteLevel = 0;
+
+String lidStatus = "CLOSED";
+
+
+// ============================================================
+// LCD FUNCTIONS
+// ============================================================
+
+void send4Bits(byte data) {
+
+  Wire.beginTransmission(LCD_ADDR);
+
+  Wire.write(data | 0x08);
+  Wire.write(data | 0x0C);
+
+  delayMicroseconds(1);
+
+  Wire.write(data | 0x08);
+
+  Wire.endTransmission();
+
+  delayMicroseconds(50);
+}
+
+
+void lcdCommand(byte cmd) {
+
+  send4Bits(cmd & 0xF0);
+
+  send4Bits((cmd << 4) & 0xF0);
+}
+
+
+void lcdChar(byte c) {
+
+  send4Bits((c & 0xF0) | 0x01);
+
+  send4Bits(((c << 4) & 0xF0) | 0x01);
+}
+
+
+void lcdText(const char *text) {
+
+  while (*text) {
+
+    lcdChar(*text++);
+
+  }
+
+}
+
+
+void lcdSetCursor(byte col, byte row) {
+
+  byte address;
+
+  if (row == 0) {
+
+    address = 0x80 + col;
+
+  }
+  else {
+
+    address = 0xC0 + col;
+
+  }
+
+  lcdCommand(address);
+}
+
+
+void lcdClear() {
+
+  lcdCommand(0x01);
+
+  delay(2);
+}
+
+
+// ============================================================
+// DISPLAY STATUS ON LCD
+// ============================================================
+
+void updateLCD() {
+
+  lcdSetCursor(0, 0);
+
+  lcdText("Waste: ");
+
+  if (wasteLevel < 10) {
+    lcdText("  ");
+  }
+  else if (wasteLevel < 100) {
+    lcdText(" ");
+  }
+
+  char levelText[8];
+
+  sprintf(levelText, "%d%%", wasteLevel);
+
+  lcdText(levelText);
+
+
+  lcdSetCursor(0, 1);
+
+  if (lidStatus == "OPEN") {
+
+    lcdText("Lid: OPEN       ");
+
+  }
+  else {
+
+    lcdText("Lid: CLOSED     ");
+
+  }
+}
+
+
+// ============================================================
+// SERVO
+// ============================================================
+
+void moveServo(int angle) {
+
+  angle = constrain(angle, 0, 180);
+
+  int pulseWidth =
+    map(angle, 0, 180, 500, 2400);
+
+  uint32_t duty =
+    (pulseWidth * 65535UL) / 20000UL;
+
+  ledcWrite(SERVO_PIN, duty);
+}
+
+
+// ============================================================
+// ULTRASONIC SENSOR
+// ============================================================
+
+float getDistance(int trigPin, int echoPin) {
+
+  digitalWrite(trigPin, LOW);
+
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+
+  delayMicroseconds(10);
+
+  digitalWrite(trigPin, LOW);
+
+
+  long duration =
+    pulseIn(
+      echoPin,
+      HIGH,
+      30000
+    );
+
+
+  if (duration == 0) {
+
+    return -1;
+
+  }
+
+
+  float distance =
+    duration * 0.0343 / 2.0;
+
+
+  return distance;
+}
+
+
+// ============================================================
+// GPS COORDINATE CONVERSION
+// ============================================================
+
+float convertCoordinate(
+  String value,
+  String direction
+) {
+
+  if (value.length() == 0) {
+
+    return 0;
+
+  }
+
+
+  float raw =
+    value.toFloat();
+
+
+  int degrees =
+    (int)(raw / 100);
+
+
+  float minutes =
+    raw - (degrees * 100);
+
+
+  float decimal =
+    degrees + minutes / 60.0;
+
+
+  if (
+    direction == "S" ||
+    direction == "W"
+  ) {
+
+    decimal = -decimal;
+
+  }
+
+
+  return decimal;
+}
+
+
+// ============================================================
+// GPS READING
+// ============================================================
+
+void readGPS() {
+
+  while (GPS.available()) {
+
+    char c = GPS.read();
+
+
+    if (c == '\n') {
+
+      if (
+        gpsLine.startsWith("$GPGGA") ||
+        gpsLine.startsWith("$GNGGA")
+      ) {
+
+        String fields[15];
+
+        int field = 0;
+
+        int start = 0;
+
+
+        for (
+          int i = 0;
+          i <= gpsLine.length() && field < 15;
+          i++
+        ) {
+
+          if (
+            i == gpsLine.length() ||
+            gpsLine[i] == ','
+          ) {
+
+            fields[field] =
+              gpsLine.substring(
+                start,
+                i
+              );
+
+            field++;
+
+            start = i + 1;
+
+          }
+
+        }
+
+
+        // field 0 = $GPGGA
+        // field 1 = time
+        // field 2 = latitude
+        // field 3 = N/S
+        // field 4 = longitude
+        // field 5 = E/W
+        // field 6 = fix quality
+
+        if (field >= 7) {
+
+          String lat =
+            fields[2];
+
+          String latDir =
+            fields[3];
+
+          String lon =
+            fields[4];
+
+          String lonDir =
+            fields[5];
+
+          int fix =
+            fields[6].toInt();
+
+
+          if (
+            fix > 0 &&
+            lat.length() > 0 &&
+            lon.length() > 0
+          ) {
+
+            latitude =
+              convertCoordinate(
+                lat,
+                latDir
+              );
+
+
+            longitude =
+              convertCoordinate(
+                lon,
+                lonDir
+              );
+
+
+            gpsValid = true;
+
+          }
+
+        }
+
+      }
+
+
+      gpsLine = "";
+
+    }
+    else {
+
+      if (c != '\r') {
+
+        gpsLine += c;
+
+      }
+
+    }
+
+  }
+
+}
+
+
+// ============================================================
+// CALCULATE WASTE LEVEL
+// ============================================================
+
+void calculateWasteLevel() {
+
+  if (wasteDistance < 0) {
+
+    wasteLevel = 0;
+
+    return;
+
+  }
+
+
+  float percentage =
+    (
+      (EMPTY_DISTANCE - wasteDistance)
+      /
+      (EMPTY_DISTANCE - FULL_DISTANCE)
+    )
+    * 100.0;
+
+
+  percentage =
+    constrain(
+      percentage,
+      0,
+      100
+    );
+
+
+  // ========================================================
+  // SHOW ONLY 0%, 25%, 50%, 75%, 100%
+  // ========================================================
+
+  if (percentage < 12.5) {
+
+    wasteLevel = 0;
+
+  }
+  else if (percentage < 37.5) {
+
+    wasteLevel = 25;
+
+  }
+  else if (percentage < 62.5) {
+
+    wasteLevel = 50;
+
+  }
+  else if (percentage < 87.5) {
+
+    wasteLevel = 75;
+
+  }
+  else {
+
+    wasteLevel = 100;
+
+  }
+
+}
+
+
+// ============================================================
+// BUZZER
+// ============================================================
+
+void updateBuzzer() {
+
+  if (wasteLevel >= 80) {
+
+    digitalWrite(
+      BUZZER_PIN,
+      HIGH
+    );
+
+  }
+  else {
+
+    digitalWrite(
+      BUZZER_PIN,
+      LOW
+    );
+
+  }
+
+}
+
+
+// ============================================================
+// LID CONTROL
+// ============================================================
+
+void updateLid() {
+
+  // ----------------------------------------------------------
+  // Open lid when object/person comes close
+  // ----------------------------------------------------------
+
+  if (
+    objectDistance > 0 &&
+    objectDistance <= OBJECT_DETECT_DISTANCE &&
+    lidStatus == "CLOSED"
+  ) {
+
+    moveServo(LID_OPEN);
+
+    lidStatus = "OPEN";
+
+    lidOpenedTime = millis();
+
+    Serial.println("LID OPEN");
+
+  }
+
+
+  // ----------------------------------------------------------
+  // Close after fixed time
+  // ----------------------------------------------------------
+
+  if (
+    lidStatus == "OPEN" &&
+    millis() - lidOpenedTime >= LID_OPEN_TIME
+  ) {
+
+    moveServo(LID_CLOSED);
+
+    lidStatus = "CLOSED";
+
+    Serial.println("LID CLOSED");
+
+  }
+
+}
+
+
+// ============================================================
+// JSON DATA
+// ============================================================
+
+String createJSON() {
+
+  String json = "{";
+
+
+  // Waste level
+
+  json += "\"wasteLevel\":";
+  json += String(wasteLevel);
+  json += ",";
+
+
+  // Waste distance
+
+  json += "\"wasteDistance\":";
+
+  if (wasteDistance < 0) {
+
+    json += "null";
+
+  }
+  else {
+
+    json += String(
+      wasteDistance,
+      2
+    );
+
+  }
+
+  json += ",";
+
+
+  // Object distance
+
+  json += "\"objectDistance\":";
+
+  if (objectDistance < 0) {
+
+    json += "null";
+
+  }
+  else {
+
+    json += String(
+      objectDistance,
+      2
+    );
+
+  }
+
+  json += ",";
+
+
+  // Lid status
+
+  json += "\"lidStatus\":\"";
+  json += lidStatus;
+  json += "\",";
+
+
+  // GPS valid
+
+  json += "\"gpsValid\":";
+
+  if (gpsValid) {
+
+    json += "true";
+
+  }
+  else {
+
+    json += "false";
+
+  }
+
+  json += ",";
+
+
+  // Latitude
+
+  json += "\"latitude\":";
+
+  if (gpsValid) {
+
+    json += String(
+      latitude,
+      6
+    );
+
+  }
+  else {
+
+    json += "null";
+
+  }
+
+  json += ",";
+
+
+  // Longitude
+
+  json += "\"longitude\":";
+
+  if (gpsValid) {
+
+    json += String(
+      longitude,
+      6
+    );
+
+  }
+  else {
+
+    json += "null";
+
+  }
+
+
+  json += "}";
+
+
+  return json;
+}
+
+
+// ============================================================
+// /data
+// ============================================================
+
+void handleData() {
+
+  String json =
+    createJSON();
+
+
+  server.sendHeader(
+    "Access-Control-Allow-Origin",
+    "*"
+  );
+
+
+  server.send(
+    200,
+    "application/json",
+    json
+  );
+
+}
+
+
+// ============================================================
+// ROOT PAGE
+// ============================================================
+
+void handleRoot() {
+
+  String message =
+    "SMART BIN ESP32\n\n";
+
+  message +=
+    "Wi-Fi connected\n";
+
+  if (apMode) {
+
+    message +=
+      "Mode: ESP32 Access Point\n";
+
+    message +=
+      "IP: ";
+
+    message +=
+      WiFi.softAPIP().toString();
+
+  }
+  else {
+
+    message +=
+      "Mode: Wi-Fi Network\n";
+
+    message +=
+      "IP: ";
+
+    message +=
+      WiFi.localIP().toString();
+
+  }
+
+  message +=
+    "\n\nUse /data for sensor data\n";
+
+
+  server.send(
+    200,
+    "text/plain",
+    message
+  );
+
+}
+
+
+// ============================================================
+// WIFI CONNECTION
+// ============================================================
+
+void connectWiFi() {
+
+  Serial.println();
+  Serial.println("Connecting to Wi-Fi...");
+
+  WiFi.mode(WIFI_STA);
+
+  WiFi.begin(
+    WIFI_SSID,
+    WIFI_PASSWORD
+  );
+
+
+  unsigned long startTime =
+    millis();
+
+
+  while (
+    WiFi.status() != WL_CONNECTED &&
+    millis() - startTime < 15000
+  ) {
+
+    delay(500);
+
+    Serial.print(".");
+
+  }
+
+
+  Serial.println();
+
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    apMode = false;
+
+    Serial.println("Wi-Fi connected!");
+
+    Serial.print("ESP32 IP address: ");
+
+    Serial.println(
+      WiFi.localIP()
+    );
+
+  }
+  else {
+
+    Serial.println(
+      "Wi-Fi connection failed."
+    );
+
+    Serial.println(
+      "Starting ESP32 Access Point..."
+    );
+
+
+    WiFi.mode(WIFI_AP);
+
+    WiFi.softAP(
+      AP_SSID,
+      AP_PASSWORD
+    );
+
+
+    apMode = true;
+
+
+    Serial.print(
+      "ESP32 AP IP address: "
+    );
+
+    Serial.println(
+      WiFi.softAPIP()
+    );
+
+  }
+
+}
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+
+  // ========================================================
+  // ULTRASONIC SENSOR 1
+  // ========================================================
+
+  pinMode(
+    TRIG1_PIN,
+    OUTPUT
+  );
+
+  pinMode(
+    ECHO1_PIN,
+    INPUT
+  );
+
+
+  // ========================================================
+  // ULTRASONIC SENSOR 2
+  // ========================================================
+
+  pinMode(
+    TRIG2_PIN,
+    OUTPUT
+  );
+
+  pinMode(
+    ECHO2_PIN,
+    INPUT
+  );
+
+
+  // ========================================================
+  // BUZZER
+  // ========================================================
+
+  pinMode(
+    BUZZER_PIN,
+    OUTPUT
+  );
+
+  digitalWrite(
+    BUZZER_PIN,
+    LOW
+  );
+
+
+  // ========================================================
+  // SERVO
+  // ========================================================
+
+  ledcAttach(
+    SERVO_PIN,
+    50,
+    16
+  );
+
+
+  moveServo(
+    LID_CLOSED
+  );
+
+
+  // ========================================================
+  // LCD
+  // ========================================================
+
+  Wire.begin(
+    SDA_PIN,
+    SCL_PIN
+  );
+
+
+  delay(50);
+
+
+  send4Bits(0x30);
+
+  delay(5);
+
+
+  send4Bits(0x30);
+
+  delay(1);
+
+
+  send4Bits(0x30);
+
+  delay(1);
+
+
+  send4Bits(0x20);
+
+
+  lcdCommand(0x28);
+
+  lcdCommand(0x0C);
+
+  lcdCommand(0x06);
+
+  lcdCommand(0x01);
+
+
+  delay(2);
+
+
+  lcdSetCursor(
+    0,
+    0
+  );
+
+  lcdText(
+    "SMART BIN"
+  );
+
+
+  lcdSetCursor(
+    0,
+    1
+  );
+
+  lcdText(
+    "Starting..."
+  );
+
+
+  // ========================================================
+  // GPS
+  // ========================================================
+
+  GPS.begin(
+    9600,
+    SERIAL_8N1,
+    GPS_RX_PIN,
+    GPS_TX_PIN
+  );
+
+
+  // ========================================================
+  // WIFI
+  // ========================================================
+
+  connectWiFi();
+
+
+  // ========================================================
+  // WEB SERVER
+  // ========================================================
+
+  server.on(
+    "/",
+    handleRoot
+  );
+
+  server.on(
+    "/data",
+    handleData
+  );
+
+
+  server.begin();
+
+
+  Serial.println(
+    "Web server started."
+  );
+
+
+  // ========================================================
+  // LCD
+  // ========================================================
+
+  lcdClear();
+
+  lcdSetCursor(
+    0,
+    0
+  );
+
+  lcdText(
+    "SMART BIN"
+  );
+
+  lcdSetCursor(
+    0,
+    1
+  );
+
+  lcdText(
+    "WiFi Ready"
+  );
+
+
+  delay(1500);
+
+}
+
+
+// ============================================================
+// LOOP
+// ============================================================
+
+void loop() {
+
+  // ----------------------------------------------------------
+  // Handle web requests
+  // ----------------------------------------------------------
+
+  server.handleClient();
+
+
+  // ----------------------------------------------------------
+  // Read GPS
+  // ----------------------------------------------------------
+
+  readGPS();
+
+
+  // ----------------------------------------------------------
+  // Read object sensor
+  // ----------------------------------------------------------
+
+  objectDistance =
+    getDistance(
+      TRIG1_PIN,
+      ECHO1_PIN
+    );
+
+
+  delay(30);
+
+
+  // ----------------------------------------------------------
+  // Read waste-level sensor
+  // ----------------------------------------------------------
+
+  wasteDistance =
+    getDistance(
+      TRIG2_PIN,
+      ECHO2_PIN
+    );
+
+
+  // ----------------------------------------------------------
+  // Calculate waste level
+  // ----------------------------------------------------------
+
+  calculateWasteLevel();
+
+
+  // ----------------------------------------------------------
+  // Control buzzer
+  // ----------------------------------------------------------
+
+  updateBuzzer();
+
+
+  // ----------------------------------------------------------
+  // Control lid
+  // ----------------------------------------------------------
+
+  updateLid();
+
+
+  // ----------------------------------------------------------
+  // Update LCD
+  // ----------------------------------------------------------
+
+  updateLCD();
+
+
+  // ----------------------------------------------------------
+  // Serial monitor
+  // ----------------------------------------------------------
+
+  Serial.print("Waste Distance: ");
+
+  if (wasteDistance < 0) {
+
+    Serial.print("ERROR");
+
+  }
+  else {
+
+    Serial.print(
+      wasteDistance,
+      2
+    );
+
+    Serial.print(" cm");
+
+  }
+
+
+  Serial.print(" | Waste Level: ");
+
+  Serial.print(
+    wasteLevel
+  );
+
+  Serial.print("%");
+
+
+  Serial.print(" | Object Distance: ");
+
+  if (objectDistance < 0) {
+
+    Serial.print("ERROR");
+
+  }
+  else {
+
+    Serial.print(
+      objectDistance,
+      2
+    );
+
+    Serial.print(" cm");
+
+  }
+
+
+  Serial.print(" | Lid: ");
+
+  Serial.print(
+    lidStatus
+  );
+
+
+  if (gpsValid) {
+
+    Serial.print(" | GPS: ");
+
+    Serial.print(
+      latitude,
+      6
+    );
+
+    Serial.print(",");
+
+    Serial.print(
+      longitude,
+      6
+    );
+
+  }
+  else {
+
+    Serial.print(" | GPS: NO FIX");
+
+  }
+
+
+  Serial.println();
+
+
+  // ----------------------------------------------------------
+  // Small delay
+  // ----------------------------------------------------------
+
+  delay(200);
+
+}
