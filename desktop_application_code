@@ -1,0 +1,95 @@
+import tkinter as tk
+from tkinter import messagebox, ttk
+from datetime import datetime
+import urllib.request
+import urllib.error
+import json
+import threading
+import queue
+import time
+import webbrowser
+
+
+# ============================================================
+# SMARTBIN - WASTE COLLECTOR DESKTOP APPLICATION
+# WI-FI VERSION
+# ============================================================
+
+
+# ============================================================
+# ESP32 WI-FI SETTINGS
+# ============================================================
+
+# Replace this with the ESP32 IP address shown in the Arduino Serial Monitor.
+# If using the ESP32 fallback Access Point, its default IP is usually 192.168.4.1.
+ESP32_URL = "http://YOUR_ESP32_IP/data"
+
+# How often Python asks the ESP32 for new data
+POLL_INTERVAL = 1.0
+
+# Demo login credentials. Change these before running the application.
+ADMIN_USERNAME = "YOUR_ADMIN_USERNAME"
+ADMIN_PASSWORD = "YOUR_ADMIN_PASSWORD"
+
+
+# ============================================================
+# COLORS
+# ============================================================
+
+BG = "#F4F7FB"
+CARD = "#FFFFFF"
+BLUE = "#2563EB"
+DARK = "#172033"
+TEXT = "#263238"
+GREY = "#718096"
+GREEN = "#16A34A"
+YELLOW = "#F59E0B"
+RED = "#DC2626"
+
+
+# ============================================================
+# GLOBAL VARIABLES
+# ============================================================
+
+# Keep only the latest reading so disconnection does not grow the queue forever.
+data_queue = queue.Queue(maxsize=1)
+
+wifi_running = False
+wifi_thread = None
+wifi_stop_event = None
+
+waste_level = 0
+waste_distance = None
+object_distance = None
+
+latitude = None
+longitude = None
+
+gps_valid = False
+lid_status = "CLOSED"
+
+last_update = "--"
+
+collected_override = False
+
+dashboard_active = False
+
+
+# ============================================================
+# MAIN WINDOW
+# ============================================================
+
+window = tk.Tk()
+
+window.title("SmartBin")
+window.geometry("1000x650")
+window.configure(bg=BG)
+
+window.resizable(False, False)
+
+
+# ============================================================
+# DASHBOARD WIDGET VARIABLES
+# ============================================================
+
+connection_label = None
